@@ -1,0 +1,84 @@
+###########################################################################################################
+###########################################CHANGELOG#######################################################
+###########################################################################################################
+# 15/11/2023 - Versão inicial
+#----------------------------------------------------------------------------------------------------------
+# 17/11/2023 - Imagem alterada para Alpine Linux visando usar menos espaço dos Runner
+#----------------------------------------------------------------------------------------------------------
+# 30/11/2023 - Versão do Composer=Stable e pull-requests via Kiuwan
+#----------------------------------------------------------------------------------------------------------
+# 12/03/2024 - Todas as extensoes em todas as pipelines e adaptando para usar variaveis por ambiente.
+###########################################################################################################
+image: google/cloud-sdk:alpine
+
+definitions:
+  steps:
+    - step: &build
+        name: Build - Composer
+        caches:
+          - composer
+        script:
+          - apk update --no-cache && apk add composer --repository=https://dl-cdn.alpinelinux.org/alpine/v3.19/community
+          - apk add php82-curl php82-mbstring php82-session php82-tokenizer php82-pdo php82-pdo_mysql php82-gd php82-fileinfo php82-xml php82-simplexml php82-xmlreader php82-xmlwriter php82-gmp php82-sodium
+          - rm -rf /var/cache/apk/*
+          - composer install --no-dev --no-progress --no-interaction
+        artifacts:
+          - vendor/**
+
+    - step: &test
+        name: Security Scan
+        script:
+          # Run a security scan for sensitive data.
+          # See more security tools at https://bitbucket.org/product/features/pipelines/integrations?&category=security
+          - pipe: atlassian/git-secrets-scan:1.4.0
+
+pipelines:
+  #  pull-requests:
+  #    '**':
+  #    - step:
+  #         name: Kiuwan Analysis
+  #         image:
+  #           name: openjdk:8
+  #         script:
+  #           - wget https://www.kiuwan.com/pub/analyzer/KiuwanLocalAnalyzer.zip -P ${HOME}
+  #           - unzip ${HOME}/KiuwanLocalAnalyzer.zip -d ${HOME}
+  #           - chmod +x ${HOME}/KiuwanLocalAnalyzer/bin/*.sh
+  #           - ${HOME}/KiuwanLocalAnalyzer/bin/agent.sh -c -n $BITBUCKET_REPO_FULL_NAME -s . --user $KIUWAN_USER --pass $KIUWAN_PASSWD
+  branches:
+    env/testing:
+      - parallel:
+          steps:
+            - step: *build
+            - step: *test
+      - step:
+          name: Deploy to SmartFastPay - QA (Google App Engine)
+          caches:
+            - composer
+          script:
+            ##########VAR#########
+            #GCP PROJECT ID
+            - export PROJECT_ID=smartfastpay--qa
+            #GCP ENVIRONMENT NAME
+            - export ENV=qa
+            #APP ENGINE SERVICE NAME
+            - export SERVICE_NAME=lives
+            #VITE APP URL
+#            - export VITE_BASE_URL=https://lives-dot-smartfastpay--qa.nw.r.appspot.com/
+            #VITE API URL
+#            - export VITE_BASE_URL_API=https://lives-dot-smartfastpay--qa.nw.r.appspot.com/api
+            ##########END##########
+#            - apk update --no-cache && apk add npm
+#            - npm install -g vite && npm install laravel-vite-plugin --save-dev
+#            - npm install
+#            - export LARAVEL_BYPASS_ENV_CHECK=1
+#            - npm run build
+            - echo "$GOOGLE_SERVICE_ACCOUNT_SFP_QA" | base64 -d > sa.json
+            - gcloud auth activate-service-account --key-file=sa.json
+            - gcloud secrets versions access latest --secret=qa-pub-sub-account --out-file=qa-pub-sub-account.json --project="$PROJECT_ID"
+            - gcloud secrets versions access latest --secret=bucket_qa_sa --out-file=bucket_qa_sa.json --project="$PROJECT_ID"
+            - gcloud secrets versions access latest --secret=aarin_crt_sandbox --out-file=certs/crt_sandbox.crt --project="$PROJECT_ID"
+            - gcloud secrets versions access latest --secret=aarin_key_sandbox --out-file=certs/key_sandbox.key --project="$PROJECT_ID"
+            - gcloud secrets versions access latest --secret=app_template_"$SERVICE_NAME"_"$ENV" --out-file=app.template.yaml --project="$PROJECT_ID"
+            - gcloud app deploy --project="$PROJECT_ID" --no-cache --quiet app.template.yaml --promote --stop-previous-version --verbosity=warning
+            - gcloud app versions list --project="$PROJECT_ID" --format="value(version.id)" --sort-by="~version.createTime" --service="$SERVICE_NAME" | tail -n +6 | xargs gcloud app versions delete --quiet --project="$PROJECT_ID"
+            - rm sa.json && rm qa-pub-sub-account.json && rm bucket_qa_sa.json && rm certs/crt_sandbox.crt && rm certs/key_sandbox.key && rm app.template.yaml
